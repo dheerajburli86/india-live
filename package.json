@@ -1,0 +1,16 @@
+{
+  "name": "india-live-prices",
+  "version": "1.0.0",
+  "description": "Kite WebSocket → Supabase india_live_prices",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "kiteconnect": "^5.0.1",
+    "node-cron": "^3.0.3",
+    "otpauth": "^9.2.2",
+    "axios": "^1.6.0"
+  }
+}
