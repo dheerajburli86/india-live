@@ -52,28 +52,92 @@ function generateTOTP() {
 async function kiteLogin() {
   console.log("🔐 Logging into Kite...");
   try {
-    // Step 1: Get request token via headless login
+    // Use a cookie jar so session cookies carry across requests
+    const jar = {};
+    const withCookies = (headers = {}) => ({
+      ...headers,
+      Cookie: Object.entries(jar).map(([k, v]) => `${k}=${v}`).join("; "),
+    });
+
+    const saveCookies = (setCookieHeader) => {
+      if (!setCookieHeader) return;
+      const cookies = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+      for (const c of cookies) {
+        const [pair] = c.split(";");
+        const [k, v] = pair.split("=");
+        jar[k.trim()] = (v || "").trim();
+      }
+    };
+
+    // Step 1: Login with user_id + password
     const loginResp = await axios.post(
       "https://kite.zerodha.com/api/login",
-      new URLSearchParams({ user_id: KITE_USER_ID, password: KITE_PASSWORD }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+      new URLSearchParams({ user_id: KITE_USER_ID, password: KITE_PASSWORD }).toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "Mozilla/5.0",
+          ...withCookies(),
+        },
+        maxRedirects: 0,
+        validateStatus: (s) => s < 500,
+      }
     );
+    saveCookies(loginResp.headers["set-cookie"]);
 
     const requestId = loginResp.data?.data?.request_id;
-    if (!requestId) throw new Error("No request_id from login");
+    if (!requestId) throw new Error(`No request_id from login. Response: ${JSON.stringify(loginResp.data)}`);
 
-    // Step 2: Submit TOTP
+    // Step 2: Submit TOTP 2FA
     const totpCode = generateTOTP();
+    console.log(`🔑 TOTP generated: ${totpCode}`);
     const twoFaResp = await axios.post(
       "https://kite.zerodha.com/api/twofa",
-      new URLSearchParams({ user_id: KITE_USER_ID, request_id: requestId, twofa_value: totpCode, twofa_type: "totp" }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+      new URLSearchParams({
+        user_id: KITE_USER_ID,
+        request_id: requestId,
+        twofa_value: totpCode,
+        twofa_type: "totp",
+      }).toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "Mozilla/5.0",
+          ...withCookies(),
+        },
+        maxRedirects: 0,
+        validateStatus: (s) => s < 500,
+      }
+    );
+    saveCookies(twoFaResp.headers["set-cookie"]);
+
+    if (twoFaResp.data?.status !== "success") {
+      throw new Error(`2FA failed: ${JSON.stringify(twoFaResp.data)}`);
+    }
+
+    // Step 3: Follow Kite Connect OAuth redirect to get request_token
+    const connectResp = await axios.get(
+      `https://kite.trade/connect/login?api_key=${KITE_API_KEY}&v=3`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          ...withCookies(),
+        },
+        maxRedirects: 0,
+        validateStatus: (s) => s < 500,
+      }
     );
 
-    const requestToken = twoFaResp.data?.data?.request_token;
-    if (!requestToken) throw new Error("No request_token from 2FA");
+    const location = connectResp.headers["location"] || "";
+    if (!location) throw new Error("No redirect location from Kite Connect OAuth");
 
-    // Step 3: Exchange for access token
+    const url = new URL(location.startsWith("http") ? location : `https://placeholder${location}`);
+    const requestToken = url.searchParams.get("request_token");
+    if (!requestToken) throw new Error(`No request_token in redirect URL: ${location}`);
+
+    console.log(`🎫 Got request_token: ${requestToken.slice(0, 8)}...`);
+
+    // Step 4: Exchange request_token for access_token
     const kc = new KiteConnect({ api_key: KITE_API_KEY });
     const session = await kc.generateSession(requestToken, KITE_API_SECRET);
     accessToken = session.access_token;
